@@ -35,6 +35,7 @@ import android.media.ImageReader.OnImageAvailableListener;
 import android.os.Bundle;
 import android.os.SystemClock;
 import android.os.Trace;
+import android.util.Log;
 import android.util.Size;
 import android.util.TypedValue;
 import android.view.Display;
@@ -54,6 +55,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Vector;
 
+import org.tensorflow.contrib.android.TensorFlowInferenceInterface;
 import org.tensorflow.demo.OverlayView.DrawCallback;
 import org.tensorflow.demo.env.BorderedText;
 import org.tensorflow.demo.env.ImageUtils;
@@ -65,12 +67,16 @@ import org.tensorflow.demo.env.Logger;
  */
 public class StylizeActivity extends CameraActivity implements OnImageAvailableListener {
   private static final Logger LOGGER = new Logger();
+  public static final String STATIC_INPUT_IMAGE_FILENAME = "neuschw_1000x1000.jpg";
 
   private TensorFlowInferenceInterface inferenceInterface;
-  private static final String MODEL_FILE = "file:///android_asset/stylize_quantized.pb";
-  private static final String INPUT_NODE = "input";
+//  private static final String MODEL_FILE = "file:///android_asset/stylize_quantized.pb";
+  private static final String MODEL_FILE = "file:///android_asset/fst_frozen_quantized_1000x1000.pb";
+//  private static final String MODEL_FILE = "file:///android_asset/fst_frozen.pb";
+  private static final String INPUT_NODE = "img_placeholder";
   private static final String STYLE_NODE = "style_num";
-  private static final String OUTPUT_NODE = "transformer/expand/conv3/conv/Sigmoid";
+//  private static final String OUTPUT_NODE = "transformer/expand/conv3/conv/Sigmoid";
+  private static final String OUTPUT_NODE = "preds";
   private static final int NUM_STYLES = 26;
 
   private static final boolean SAVE_PREVIEW_BITMAP = false;
@@ -105,6 +111,7 @@ public class StylizeActivity extends CameraActivity implements OnImageAvailableL
   private final float[] styleVals = new float[NUM_STYLES];
   private int[] intValues;
   private float[] floatValues;
+//  private float[][] ft = new float[1];
 
   private int frameNum = 0;
 
@@ -126,6 +133,8 @@ public class StylizeActivity extends CameraActivity implements OnImageAvailableL
 
   private ImageGridAdapter adapter;
   private GridView grid;
+
+  private Bitmap stockBm;
 
   private final OnTouchListener gridTouchAdapter =
       new OnTouchListener() {
@@ -178,7 +187,28 @@ public class StylizeActivity extends CameraActivity implements OnImageAvailableL
 
   @Override
   public void onCreate(final Bundle savedInstanceState) {
+
     super.onCreate(savedInstanceState);
+
+    stockBm = getBitmapFromAsset(this, STATIC_INPUT_IMAGE_FILENAME);
+    intValues = new int[stockBm.getWidth()*stockBm.getHeight()];
+    floatValues = new float[intValues.length * 3];
+    runInBackground(
+            new Runnable() {
+              @Override
+              public void run() {
+                cropCopyBitmap = Bitmap.createBitmap(croppedBitmap);
+
+                final long startTime = SystemClock.uptimeMillis();
+                stylizeImage(croppedBitmap);
+                lastProcessingTimeMs = SystemClock.uptimeMillis() - startTime;
+
+                textureCopyBitmap = Bitmap.createBitmap(croppedBitmap);
+
+                requestRender();
+                computing = false;
+              }
+            });
   }
 
   @Override
@@ -488,8 +518,10 @@ public class StylizeActivity extends CameraActivity implements OnImageAvailableL
 
         yuvBytes = new byte[3][];
 
-        intValues = new int[desiredSize * desiredSize];
-        floatValues = new float[desiredSize * desiredSize * 3];
+//        intValues = new int[desiredSize * desiredSize];
+//        intValues = new int[400*300];
+//        floatValues = new float[desiredSize * desiredSize * 3];
+//        floatValues = new float[400*300*3];
         initializedSize = desiredSize;
       }
 
@@ -554,8 +586,19 @@ public class StylizeActivity extends CameraActivity implements OnImageAvailableL
     Trace.endSection();
   }
 
-  private void stylizeImage(final Bitmap bitmap) {
+  private void stylizeImage(final Bitmap inbitmap) {
     ++frameNum;
+    long startTime = System.currentTimeMillis();
+    final Bitmap bitmap = stockBm != null ? stockBm : inbitmap;
+    if (stockBm != null) {
+      stockBm.getPixels(intValues, 0, stockBm.getWidth(), 0, 0, stockBm.getWidth(), stockBm.getHeight());
+    } else {
+
+    }
+
+    Log.i("ST", "Stylizing image start: " + startTime);
+
+
     bitmap.getPixels(intValues, 0, bitmap.getWidth(), 0, 0, bitmap.getWidth(), bitmap.getHeight());
 
     if (DEBUG_MODEL) {
@@ -578,26 +621,33 @@ public class StylizeActivity extends CameraActivity implements OnImageAvailableL
         floatValues[i * 3] = ((val >> 16) & 0xFF) / 255.0f;
         floatValues[i * 3 + 1] = ((val >> 8) & 0xFF) / 255.0f;
         floatValues[i * 3 + 2] = (val & 0xFF) / 255.0f;
+//        floatValues[i * 3] = (((val >> 16) & 0xFF) - 128.0f ) / 128.0f;
+//        floatValues[i * 3 + 1] = (((val >> 8) & 0xFF) - 128.0f) / 128.0f;
+//        floatValues[i * 3 + 2] = ((val & 0xFF) - 128.0f) / 128.0f;
       }
     }
 
+
     // Copy the input data into TensorFlow.
-    inferenceInterface.feed(INPUT_NODE, floatValues, 1, bitmap.getWidth(), bitmap.getHeight(), 3);
-    inferenceInterface.feed(STYLE_NODE, styleVals, NUM_STYLES);
+    inferenceInterface.feed(INPUT_NODE, floatValues, bitmap.getWidth(), bitmap.getHeight(), 3);
+//    inferenceInterface.feed(STYLE_NODE, styleVals, 1);
 
     // Execute the output node's dependency sub-graph.
     inferenceInterface.run(new String[] {OUTPUT_NODE}, isDebug());
 
     // Copy the data from TensorFlow back into our array.
+//    inferenceInterface.fetch
     inferenceInterface.fetch(OUTPUT_NODE, floatValues);
 
     for (int i = 0; i < intValues.length; ++i) {
       intValues[i] =
           0xFF000000
-              | (((int) (floatValues[i * 3] * 255)) << 16)
-              | (((int) (floatValues[i * 3 + 1] * 255)) << 8)
-              | ((int) (floatValues[i * 3 + 2] * 255));
+              | (((int) (Math.min(Math.max(floatValues[i * 3],0.0f), 255.0f))) << 16)
+              | (((int) (Math.min(Math.max(floatValues[i * 3 + 1],0.0f), 255.0f))) << 8)
+              | ((int)  (Math.min(Math.max(floatValues[i * 3 + 2],0.0f), 255.0f)));
     }
+
+    Log.i("ST", "Stylizing image took " + (System.currentTimeMillis()-startTime) + "ms");
 
     bitmap.setPixels(intValues, 0, bitmap.getWidth(), 0, 0, bitmap.getWidth(), bitmap.getHeight());
   }
